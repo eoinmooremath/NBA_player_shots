@@ -1,6 +1,11 @@
-# temp downloads / intermediates
+# scratch downloads
 work/
 
-# if you ever accidentally output these to repo root
-nba_shot_data_cleaned.parquet
-nba_shot_data_final.parquet
+# big intermediates created during build
+nba_shot_data_clean*.parquet
+nba_shot_data_final*.parquet
+
+# python
+__pycache__/
+*.pyc
+.venv/
