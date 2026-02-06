@@ -169,7 +169,7 @@ def clean_shot_data(
     log = print if debug else (lambda *a, **k: None)
 
     log(f"Loading {input_path} ...")
-    df = pd.read_parquet(input_path)
+    df = pd.read_parquet(input_path, dtype_backend="pyarrow")
     log(f"Raw loaded: n={len(df):,}, cols={len(df.columns)}")
 
     # Keep only shot rows
