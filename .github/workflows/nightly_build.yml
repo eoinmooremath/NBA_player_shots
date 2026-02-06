@@ -1,22 +1,23 @@
-name: Nightly Build (hex_cache)
+name: Nightly build (hex_cache + player_index)
 
 on:
-  workflow_dispatch:
   schedule:
-    # 3:30am PST = 11:30 UTC (NOTE: during PDT this will run at 4:30am local)
+    # 03:30 America/Los_Angeles during Standard Time (PST = UTC-8) => 11:30 UTC
+    # When DST (PDT=UTC-7) starts, this will run at 04:30 local unless you adjust.
     - cron: "30 11 * * *"
-
-concurrency:
-  group: nightly-hex-cache
-  cancel-in-progress: false
+  workflow_dispatch: {}
 
 permissions:
   contents: write
 
+concurrency:
+  group: nightly-build
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # cannot exceed GitHub-hosted 6h job limit anyway
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,37 +28,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      # If you're using legacy kaggle.json (simplest, doesn't rotate anything):
-      - name: Configure Kaggle credentials
-        env:
-          KAGGLE_JSON: ${{ secrets.KAGGLE_JSON }}
-        run: |
-          mkdir -p ~/.kaggle
-          echo "$KAGGLE_JSON" > ~/.kaggle/kaggle.json
-          chmod 600 ~/.kaggle/kaggle.json
+          pip install -r requirements-build.txt
 
       - name: Run nightly pipeline
+        env:
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
-          python scripts/nightly_pipeline.py \
-            --dataset eoinamoore/historical-nba-data-and-player-box-scores \
-            --workdir work \
-            --force
+          python scripts/nightly_pipeline.py --dataset eoinamoore/historical-nba-data-and-player-box-scores --workdir work --force-download
 
-      - name: Commit & push if changed
+      - name: Commit & push updated artifacts
         run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Commit only deploy artifacts (not the raw work downloads)
+          git add hex_cache player_index.parquet nba_shot_data_final.parquet nba_shot_data_clean.parquet || true
+
           git status --porcelain
-          if [ -n "$(git status --porcelain)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -m "Nightly hex_cache update ($(date -u +'%Y-%m-%d'))"
-            git push
-          else
-            echo "No changes to commit."
-          fi
+          git commit -m "Nightly cache update (UTC) $(date -u +'%Y-%m-%d')" || echo "No changes to commit"
+          git push
