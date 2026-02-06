@@ -6,3 +6,5 @@ pyarrow>=12
 polars>=0.20
 kaggle>=1.8.0
 kagglehub>= 0.4.1
+pyarrow
+fastparquet
