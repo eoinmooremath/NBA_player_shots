@@ -1,24 +1,25 @@
-name: Nightly Hex Cache Build
+name: Nightly build (hex_cache + player_index)
 
 on:
-  workflow_dispatch:
   schedule:
-    # 3:30am PST == 11:30 UTC (PST is UTC-8). GitHub cron is UTC.
+    # 03:30 America/Los_Angeles during Standard Time (PST = UTC-8) => 11:30 UTC
+    # When DST (PDT=UTC-7) starts, this will run at 04:30 local unless you adjust.
     - cron: "30 11 * * *"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
 
 concurrency:
-  group: nightly-hex-cache
-  cancel-in-progress: true
+  group: nightly-build
+  cancel-in-progress: false
 
 jobs:
-  build-and-commit:
+  build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -29,41 +30,25 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-build.txt
 
-      - name: Configure Kaggle credentials
+      - name: Run nightly pipeline
         env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
-          mkdir -p ~/.kaggle
-          printf '{"username":"%s","key":"%s"}' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > ~/.kaggle/kaggle.json
-          chmod 600 ~/.kaggle/kaggle.json
+          python scripts/nightly_pipeline.py --dataset eoinamoore/historical-nba-data-and-player-box-scores --workdir work --force-download
 
-      - name: Run nightly build (download Kaggle -> build.py -> hex_cache + player_index)
-        run: |
-          python scripts/nightly_build.py \
-            --dataset eoinamoore/historical-nba-data-and-player-box-scores \
-            --workdir work \
-            --fresh \
-            --force_download \
-            --force_cache
-
-      - name: Commit & push if artifacts changed
+      - name: Commit & push updated artifacts
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Only commit the runtime artifacts needed by Streamlit
-          git add hex_cache player_index.parquet
+          # Commit only deploy artifacts (not the raw work downloads)
+          git add hex_cache player_index.parquet nba_shot_data_final.parquet nba_shot_data_clean.parquet || true
 
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git commit -m "Nightly hex_cache update (UTC) $(date -u +%Y-%m-%d)"
+          git status --porcelain
+          git commit -m "Nightly cache update (UTC) $(date -u +'%Y-%m-%d')" || echo "No changes to commit"
           git push
