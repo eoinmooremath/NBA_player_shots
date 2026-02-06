@@ -1,0 +1,6 @@
+# temp downloads / intermediates
+work/
+
+# if you ever accidentally output these to repo root
+nba_shot_data_cleaned.parquet
+nba_shot_data_final.parquet
