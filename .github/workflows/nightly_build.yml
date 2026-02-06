@@ -35,8 +35,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Fix for "Operation Canceled" / OOM errors
+      - name: Increase Swap Memory
+        run: |
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          sudo swapon --show
+
       - name: Run nightly pipeline
         env:
+          # This maps your repo secret to the environment variable the script reads
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
           python scripts/nightly_pipeline.py \
