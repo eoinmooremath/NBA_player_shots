@@ -22,8 +22,7 @@ def _ensure_file(path_or_dir: Path, filename: str) -> Path:
     """
     if path_or_dir.is_file():
         return path_or_dir
-    candidate = path_or_dir / filename
-    return candidate
+    return path_or_dir / filename
 
 
 def download_kaggle_files(dataset: str, workdir: Path, force: bool = True) -> dict[str, Path]:
@@ -32,20 +31,19 @@ def download_kaggle_files(dataset: str, workdir: Path, force: bool = True) -> di
     """
     workdir.mkdir(parents=True, exist_ok=True)
 
-    # Fail fast if token isn't present (recommended path for GitHub Actions).
-    # kagglehub also supports ~/.kaggle/access_token. :contentReference[oaicite:2]{index=2}
+    # kagglehub supports KAGGLE_API_TOKEN (recommended) or ~/.kaggle/access_token
     if not os.environ.get("KAGGLE_API_TOKEN") and not (Path.home() / ".kaggle" / "access_token").exists():
         raise SystemExit(
             "Missing Kaggle auth. Set KAGGLE_API_TOKEN (recommended) or provide ~/.kaggle/access_token."
         )
 
-    out = {}
+    out: dict[str, Path] = {}
     for fname in NEEDED_FILES:
-        # kagglehub supports downloading a dataset or a specific file via `path=...`. :contentReference[oaicite:3]{index=3}
+        print(f"Downloading to {workdir / fname}...")
         p = kagglehub.dataset_download(
             dataset,
-            path=fname,
-            output_dir=str(workdir),
+            path=fname,                 # download a specific file from the dataset
+            output_dir=str(workdir),    # place it in workdir
             force_download=force,
         )
         p = _ensure_file(Path(p), fname)
@@ -58,42 +56,40 @@ def download_kaggle_files(dataset: str, workdir: Path, force: bool = True) -> di
 
 def run_build(repo_root: Path, workdir: Path, debug: bool = False) -> None:
     """
-    Calls your repo's build.py to produce:
-      - hex_cache/
+    Calls build.py to produce:
+      - cache_dir (hex_cache/)
       - player_index.parquet
-      - (optionally) nba_shot_data_final.parquet
-    Adjust CLI flags here to match your build.py.
+      - clean/final parquet (optional, but you already wire these)
     """
     build_py = repo_root / "build.py"
     if not build_py.exists():
-        raise SystemExit(f"Missing {build_py}. Put your orchestrator at repo root or update this script.")
+        raise SystemExit(f"Missing {build_py}. Put build.py at repo root or update this script.")
 
-    # Common outputs (what your Streamlit app expects)
-    hex_cache_dir = repo_root / "hex_cache"
+    # These match your build.py flags from the usage string in your log
+    cache_dir = repo_root / "hex_cache"
     player_index = repo_root / "player_index.parquet"
     final_out = repo_root / "nba_shot_data_final.parquet"
     clean_out = repo_root / "nba_shot_data_clean.parquet"
 
-    # Ensure we start clean so stale bins don't linger
-    if hex_cache_dir.exists():
-        shutil.rmtree(hex_cache_dir, ignore_errors=True)
+    # Clean old cache to avoid stale partitions/files
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
     cmd = [
         sys.executable,
         str(build_py),
 
-        # Inputs downloaded from Kaggle into workdir
         "--pbp", str(workdir / "PlayByPlay.parquet"),
         "--games", str(workdir / "Games.csv"),
         "--players", str(workdir / "Players.csv"),
 
-        # Outputs committed to repo
         "--clean_out", str(clean_out),
         "--final_out", str(final_out),
         "--player_index", str(player_index),
-        "--hex_cache_dir", str(hex_cache_dir),
 
-        "--force",
+        "--cache_dir", str(cache_dir),
+
+        "--force_cache",
     ]
     if debug:
         cmd.append("--debug")
@@ -102,7 +98,7 @@ def run_build(repo_root: Path, workdir: Path, debug: bool = False) -> None:
     subprocess.run(cmd, check=True, cwd=str(repo_root))
 
     # Sanity checks
-    if not hex_cache_dir.exists():
+    if not cache_dir.exists():
         raise SystemExit("Build failed: hex_cache/ not created.")
     if not player_index.exists():
         raise SystemExit("Build failed: player_index.parquet not created.")
@@ -123,10 +119,10 @@ def main():
     print("Work:", workdir)
     print("Dataset:", args.dataset)
 
-    # Download required raw files (do NOT commit these)
+    # 1) Download raw files into work/ (do not commit these)
     download_kaggle_files(args.dataset, workdir, force=args.force_download)
 
-    # Build derived artifacts (DO commit these)
+    # 2) Build derived artifacts in repo root (commit these)
     run_build(repo_root, workdir, debug=args.debug)
 
     print("Nightly pipeline complete.")
