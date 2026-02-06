@@ -37,8 +37,7 @@ jobs:
 
       - name: Run nightly pipeline
         env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
         run: |
           python scripts/nightly_pipeline.py \
             --dataset eoinamoore/historical-nba-data-and-player-box-scores \
