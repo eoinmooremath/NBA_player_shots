@@ -1,16 +1,13 @@
 # shot_data_cleaning.py
 import argparse
+import polars as pl
 import numpy as np
-import pandas as pd
-import pyarrow.parquet as pq
-
 from .shot_type_bucketing import shot_type_simple_from_subtype
 
 # ---- Court constants (feet) ----
 COURT_LENGTH_FT = 94.0
 COURT_WIDTH_FT = 50.0
 RIM_OFFSET_FT = 5.25
-
 RIGHT_RIM_X_FT = COURT_LENGTH_FT - RIM_OFFSET_FT  # 88.75
 RIM_Y_FT = COURT_WIDTH_FT / 2.0                   # 25.0
 
@@ -18,131 +15,20 @@ RIM_Y_FT = COURT_WIDTH_FT / 2.0                   # 25.0
 XMIN_VIZ, XMAX_VIZ = 0.0, 940.0
 YMIN_VIZ, YMAX_VIZ = 0.0, 500.0
 
-
-# CRITICAL: exclude list-typed columns like `qualifiers` to prevent crashes.
+# Columns to select (Polars optimizes this automatically, but good to be explicit)
 PBP_COLS_NEEDED = [
-    # ids / keys
     "GameID", "gameId", "personId", "teamId", "teamTricode",
-    # season / time context
     "Season", "period", "periodType", "clock", "timeActual",
-    # shot classification
     "actionType", "subType", "descriptor", "description",
-    # shot result / points
     "shotResult", "ShotOutcome", "shotValue", "pointsTotal", "isFieldGoal",
-    # geometry
     "xLegacy", "yLegacy", "shotDistance",
-    # misc
     "actionNumber", "actionId", "side", "location",
-    # Metadata for filtering/joins
     "firstName", "lastName", "Full_Name",
     "hometeamId", "awayteamId", "hometeamCity", "hometeamName", 
     "awayteamCity", "awayteamName", "gameType",
     "playerTeamCity", "playerTeamName", "opponentTeamCity", "opponentTeamName",
     "SeasonPhase", "IsPostseason", "area", "areaDetail"
 ]
-
-
-def read_pbp_parquet_safe(path: str) -> pd.DataFrame:
-    """
-    1. Identifies safe columns (skipping complex nested types).
-    2. Loads ONLY those columns using the 'pyarrow' backend for maximum memory efficiency.
-    """
-    # 1. Inspect the file to see what columns exist
-    pf = pq.ParquetFile(path)
-    available = set(pf.schema.names)
-
-    # 2. Intersect with our needed list
-    cols = [c for c in PBP_COLS_NEEDED if c in available]
-
-    if "GameID" not in cols and "gameId" not in cols:
-        raise ValueError(f"Parquet missing GameID. Available: {list(available)[:10]}...")
-
-    # 3. Read using Pandas with PyArrow backend (Memory Efficient + Fast)
-    df = pd.read_parquet(
-        path, 
-        columns=cols, 
-        dtype_backend="pyarrow"  # <--- The Magic Memory Saver
-    )
-
-    # Normalize GameID
-    if "GameID" not in df.columns and "gameId" in df.columns:
-        df = df.rename(columns={"gameId": "GameID"})
-
-    return df
-
-
-def _season_debug(df: pd.DataFrame) -> str:
-    if "Season" not in df.columns:
-        return "(no Season column)"
-    s = pd.to_numeric(df["Season"], errors="coerce").dropna()
-    if s.empty: return "Season all null"
-    return f"Season {int(s.min())}..{int(s.max())} (unique={s.astype(int).nunique()}, n={len(df):,})"
-
-
-def derive_season_from_gameid(df: pd.DataFrame) -> pd.DataFrame:
-    gid = df["GameID"].astype(str).str.strip().str.zfill(10)
-    yy = pd.to_numeric(gid.str[3:5], errors="coerce")
-    season = np.where(yy >= 50, 1900 + yy, 2000 + yy)
-    df["Season"] = pd.Series(season, index=df.index).astype("Int64")
-    return df
-
-
-def normalize_from_legacy(df: pd.DataFrame) -> pd.DataFrame:
-    w_ft = pd.to_numeric(df["xLegacy"], errors="coerce") / 10.0
-    d_ft = pd.to_numeric(df["yLegacy"], errors="coerce") / 10.0
-    x_ft = RIGHT_RIM_X_FT - d_ft
-    y_ft = RIM_Y_FT + w_ft
-    df["x_viz"] = (x_ft * 10.0).astype("float32")
-    df["y_viz"] = (y_ft * 10.0).astype("float32")
-    df["y_viz_centered"] = (df["y_viz"] - (RIM_Y_FT * 10.0)).astype("float32")
-    return df
-
-
-def is_shot_row(df: pd.DataFrame) -> pd.Series:
-    if "isFieldGoal" in df.columns:
-        fg = df["isFieldGoal"]
-        # Handle PyArrow boolean type or standard object type
-        if pd.api.types.is_bool_dtype(fg.dtype):
-            return fg.fillna(False)
-        fg_num = pd.to_numeric(fg, errors="coerce").fillna(0).astype(int)
-        return fg_num.eq(1)
-
-    m = pd.Series(False, index=df.index)
-    if "shotResult" in df.columns:
-        sr = df["shotResult"].astype(str).str.strip().str.lower()
-        m |= sr.isin(["made", "missed"])
-    if "shotDistance" in df.columns:
-        sd = pd.to_numeric(df["shotDistance"], errors="coerce")
-        m |= sd.notna()
-    if "actionType" in df.columns:
-        at = df["actionType"].astype(str).str.strip().str.lower()
-        m |= at.str.contains("shot", na=False) & ~at.str.contains("free", na=False)
-        m |= at.isin(["made shot", "missed shot", "2pt", "3pt"])
-    return m
-
-
-def build_shot_outcome(df: pd.DataFrame) -> pd.Series:
-    if "shotResult" in df.columns:
-        sr = df["shotResult"].astype(str).str.strip().str.lower()
-        made_sr = sr.eq("made")
-    else: made_sr = pd.Series(False, index=df.index)
-
-    if "actionType" in df.columns:
-        at = df["actionType"].astype(str).str.lower()
-        made_at = at.str.contains("made", na=False)
-        miss_at = at.str.contains("miss", na=False)
-    else: made_at, miss_at = pd.Series(False, index=df.index), pd.Series(False, index=df.index)
-
-    if "description" in df.columns:
-        desc = df["description"].astype(str)
-        miss_desc = desc.str.contains("MISS", case=False, na=False)
-    else: miss_desc = pd.Series(False, index=df.index)
-
-    made = made_sr | made_at
-    miss = miss_at | miss_desc
-    out = np.where(made, 1, np.where(miss, 0, 0)).astype("int8")
-    return pd.Series(out, index=df.index)
-
 
 def clean_shot_data(
     input_path: str = "nba_pbp_v3_backup.parquet",
@@ -151,65 +37,154 @@ def clean_shot_data(
     debug: bool = False,
 ) -> None:
     log = print if debug else (lambda *a, **k: None)
-    log(f"Loading {input_path} ...")
+    log(f"Scanning {input_path} via Polars...")
 
-    # --- USE COMBINED SAFE READER ---
-    df = read_pbp_parquet_safe(input_path)
-    # --------------------------------
+    # 1. Scan Parquet (Lazy Frame) - Instantaneous, no data loaded yet
+    # infer_schema_length=0 forces it to read the file schema directly
+    lf = pl.scan_parquet(input_path)
     
-    log(f"Loaded: n={len(df):,}, cols={len(df.columns)}")
-
-    # Keep only shot rows
-    m_shot = is_shot_row(df)
-    df = df.loc[m_shot].copy()
-    log(f"After is_shot_row: n={len(df):,} ({m_shot.mean():.4f} kept). {_season_debug(df)}")
-
-    # Ensure Season
-    if "Season" not in df.columns or df["Season"].isna().all():
-        if "GameID" not in df.columns:
-            raise KeyError("Missing Season and GameID; cannot derive Season.")
-        df = derive_season_from_gameid(df)
-        log(f"Derived Season from GameID. {_season_debug(df)}")
-
-    # Numeric IDs
-    for col in ["personId", "teamId"]:
-        if col in df.columns: df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # ShotType_Simple
-    if "subType" in df.columns:
-        df["ShotType_Simple"] = shot_type_simple_from_subtype(df["subType"]).astype(str)
-    else: df["ShotType_Simple"] = "Other"
-
-    # ShotOutcome
-    df["ShotOutcome"] = build_shot_outcome(df)
-
-    # Coords
-    if "xLegacy" not in df.columns or "yLegacy" not in df.columns:
-        raise KeyError("Expected xLegacy and yLegacy columns.")
-    xL = pd.to_numeric(df["xLegacy"], errors="coerce")
-    yL = pd.to_numeric(df["yLegacy"], errors="coerce")
-    coord_ok = xL.notna() & yL.notna()
-    df = df.loc[coord_ok].copy()
+    # 2. Filter Columns (Handle GameID/gameId mismatch lazily)
+    available_cols = lf.columns
+    cols_to_select = [c for c in PBP_COLS_NEEDED if c in available_cols]
     
-    df = normalize_from_legacy(df)
+    lf = lf.select(cols_to_select)
+    
+    # Normalize GameID
+    if "GameID" not in lf.columns and "gameId" in lf.columns:
+        lf = lf.rename({"gameId": "GameID"})
+    
+    # 3. Create Basic Filters (Shot Detection)
+    # logic: isFieldGoal == 1 OR shotResult in [made, missed] OR ...
+    
+    # Pre-calculate boolean expressions
+    # Note: Polars handles nulls in boolean logic differently (null != False), so we use fill_null
+    
+    # isFieldGoal check
+    has_ifg = "isFieldGoal" in lf.columns
+    expr_ifg = pl.col("isFieldGoal").fill_null(0).cast(pl.Int8).eq(1) if has_ifg else pl.lit(False)
+    
+    # shotResult check
+    has_sr = "shotResult" in lf.columns
+    expr_sr = pl.col("shotResult").str.to_lowercase().is_in(["made", "missed"]) if has_sr else pl.lit(False)
 
-    # Bounds filter
+    # shotDistance check
+    has_sd = "shotDistance" in lf.columns
+    expr_sd = pl.col("shotDistance").is_not_null() if has_sd else pl.lit(False)
+
+    # actionType check
+    has_at = "actionType" in lf.columns
+    if has_at:
+        at_clean = pl.col("actionType").str.strip_chars().str.to_lowercase()
+        expr_at = (
+            (at_clean.str.contains("shot") & ~at_clean.str.contains("free")) |
+            at_clean.is_in(["made shot", "missed shot", "2pt", "3pt"])
+        )
+    else:
+        expr_at = pl.lit(False)
+
+    # Apply Shot Filter
+    lf = lf.filter(expr_ifg | expr_sr | expr_sd | expr_at)
+
+    # 4. Transformations (Season, Coords, Outcomes)
+    lf = lf.with_columns([
+        # --- Season Derivation ---
+        # "00223..." -> slice(3,2) -> "23" -> cast int -> logic
+        pl.when(pl.col("Season").is_null())
+          .then(
+              pl.when(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) >= 50)
+                .then(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) + 1900)
+                .otherwise(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) + 2000)
+          )
+          .otherwise(pl.col("Season"))
+          .cast(pl.Int64)
+          .alias("Season"),
+          
+        # --- Numeric Casting ---
+        pl.col("personId").cast(pl.Float64, strict=False),
+        pl.col("teamId").cast(pl.Float64, strict=False),
+        
+        # --- Normalize Legacy Coords ---
+        (pl.col("xLegacy").cast(pl.Float64, strict=False) / 10.0).alias("_w_ft"),
+        (pl.col("yLegacy").cast(pl.Float64, strict=False) / 10.0).alias("_d_ft"),
+    ])
+
+    # Calculate Visual Coords based on previous step
+    # Polars runs expressions in parallel, but dependent columns need a second context 
+    # or just chained expressions. Chaining is cleaner here.
+    lf = lf.with_columns([
+        ((pl.lit(RIGHT_RIM_X_FT) - pl.col("_d_ft")) * 10.0).cast(pl.Float32).alias("x_viz"),
+        ((pl.lit(RIM_Y_FT) + pl.col("_w_ft")) * 10.0).cast(pl.Float32).alias("y_viz"),
+    ])
+    
+    lf = lf.with_columns([
+        (pl.col("y_viz") - (RIM_Y_FT * 10.0)).cast(pl.Float32).alias("y_viz_centered")
+    ])
+
+    # --- Shot Outcome Logic ---
+    # Made if: shotResult='made' OR actionType has 'made'
+    # Miss if: actionType has 'miss' OR description has 'MISS'
+    
+    is_made = pl.lit(False)
+    is_miss = pl.lit(False)
+    
+    if "shotResult" in lf.columns:
+        is_made = is_made | pl.col("shotResult").str.to_lowercase().eq("made")
+        
+    if "actionType" in lf.columns:
+        at_lower = pl.col("actionType").str.to_lowercase()
+        is_made = is_made | at_lower.str.contains("made")
+        is_miss = is_miss | at_lower.str.contains("miss")
+        
+    if "description" in lf.columns:
+        is_miss = is_miss | pl.col("description").str.contains("(?i)MISS") # case insensitive regex
+        
+    lf = lf.with_columns(
+        pl.when(is_made).then(1)
+          .when(is_miss).then(0)
+          .otherwise(0)
+          .cast(pl.Int8)
+          .alias("ShotOutcome")
+    )
+
+    # 5. Bounds Filter
     if bounds_filter:
-        in_bounds = df["x_viz"].between(XMIN_VIZ, XMAX_VIZ) & df["y_viz"].between(YMIN_VIZ, YMAX_VIZ)
-        df = df.loc[in_bounds].copy()
-        log(f"After bounds filter: n={len(df):,}")
+        lf = lf.filter(
+            pl.col("x_viz").is_between(XMIN_VIZ, XMAX_VIZ) & 
+            pl.col("y_viz").is_between(YMIN_VIZ, YMAX_VIZ)
+        )
 
-    # Final Column Selection
-    cols_to_keep = PBP_COLS_NEEDED + [
-        "ShotType_Simple", "ShotOutcome",
-        "x_viz", "y_viz", "y_viz_centered",
-        "hometeamId", "awayteamId",
-    ]
-    final_cols = list(dict.fromkeys([c for c in cols_to_keep if c in df.columns]))
+    # 6. ShotType_Simple (User-Defined Function)
+    # Since `shot_type_simple_from_subtype` is Python code, we must execute it.
+    # We collect strictly necessary columns, map, and join back OR just map if dataset is small enough now.
+    # Note: Because this uses an external Python function, we can't stream this specific step easily 
+    # without map_elements (which is slow) or rewriting that function in Polars expressions.
+    # STRATEGY: We will collect the dataset now (it's filtered and safe), convert to pandas for 
+    # just this one column if needed, or stick to Polars map_elements.
+    
+    log("Executing plan (Streaming)...")
+    
+    # STREAMING: This is the magic that prevents OOM
+    df = lf.collect(streaming=True)
+    
+    log(f"Filtered to {len(df):,} rows.")
 
-    log(f"Saving {len(df):,} rows -> {output_path}")
-    # Write back to parquet (will write using pyarrow automatically)
-    df[final_cols].to_parquet(output_path, index=False)
+    # 7. Apply the Python UDF for ShotType
+    # We do this post-collection on the smaller dataset
+    if "subType" in df.columns:
+        # Convert to pandas for the UDF to ensure 100% compatibility with your existing helper
+        # or use map_elements if you prefer to stay in Polars.
+        # Given the existing helper likely expects a Series, we'll leverage the helper.
+        
+        # Fast way: Extract column, to pandas, map, back to polars
+        subtypes_pd = df["subType"].to_pandas()
+        simple_types = shot_type_simple_from_subtype(subtypes_pd).astype(str)
+        df = df.with_columns(pl.Series("ShotType_Simple", simple_types))
+    else:
+        df = df.with_columns(pl.lit("Other").alias("ShotType_Simple"))
+
+    # 8. Save
+    log(f"Saving to {output_path}...")
+    df.write_parquet(output_path)
     log("Done.")
 
 def main():
