@@ -1,135 +1,173 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-import os
-import sys
-import shutil
+# scripts/nightly_pipeline.py
+#
+# Nightly:
+#   - downloads PlayByPlay.parquet, Games.csv, Players.csv from Kaggle dataset
+#   - runs build.py to generate hex_cache/ and player_index.parquet
+#   - removes large intermediates (nba_shot_data_clean.parquet, nba_shot_data_final.parquet)
+#
 import argparse
+import json
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
-import kagglehub  # uses KAGGLE_API_TOKEN or ~/.kaggle/access_token
+
+REQUIRED_FILES = ["PlayByPlay.parquet", "Games.csv", "Players.csv"]
 
 
-DATASET_DEFAULT = "eoinamoore/historical-nba-data-and-player-box-scores"
-NEEDED_FILES = ["PlayByPlay.parquet", "Games.csv", "Players.csv"]
+def run(cmd: list[str], cwd: Path | None = None) -> None:
+    print("\n$ " + " ".join(map(str, cmd)))
+    subprocess.run(cmd, check=True, cwd=str(cwd) if cwd else None)
 
 
-def _ensure_file(path_or_dir: Path, filename: str) -> Path:
+def ensure_kaggle_json() -> Path:
     """
-    kagglehub.dataset_download sometimes returns a file path, sometimes a directory.
-    This makes it robust.
+    Kaggle tooling (both CLI + KaggleApi) looks for:
+      - env vars KAGGLE_USERNAME / KAGGLE_KEY, OR
+      - ~/.kaggle/kaggle.json with {"username": "...", "key": "..."}
     """
-    if path_or_dir.is_file():
-        return path_or_dir
-    candidate = path_or_dir / filename
-    return candidate
+    username = os.environ.get("KAGGLE_USERNAME", "").strip()
+    key = os.environ.get("KAGGLE_KEY", "").strip()
 
-
-def download_kaggle_files(dataset: str, workdir: Path, force: bool = True) -> dict[str, Path]:
-    """
-    Downloads only the needed files into workdir using Kaggle API Token auth.
-    """
-    workdir.mkdir(parents=True, exist_ok=True)
-
-    # Fail fast if token isn't present (recommended path for GitHub Actions).
-    # kagglehub also supports ~/.kaggle/access_token. :contentReference[oaicite:2]{index=2}
-    if not os.environ.get("KAGGLE_API_TOKEN") and not (Path.home() / ".kaggle" / "access_token").exists():
+    if not username or not key:
         raise SystemExit(
-            "Missing Kaggle auth. Set KAGGLE_API_TOKEN (recommended) or provide ~/.kaggle/access_token."
+            "Missing Kaggle credentials. Set GitHub Actions secrets:\n"
+            "  - KAGGLE_USERNAME\n"
+            "  - KAGGLE_KEY  (you can put a Kaggle API Token here)\n"
         )
 
-    out = {}
-    for fname in NEEDED_FILES:
-        # kagglehub supports downloading a dataset or a specific file via `path=...`. :contentReference[oaicite:3]{index=3}
-        p = kagglehub.dataset_download(
-            dataset,
-            path=fname,
-            output_dir=str(workdir),
-            force_download=force,
+    kaggle_dir = Path.home() / ".kaggle"
+    kaggle_dir.mkdir(parents=True, exist_ok=True)
+    kaggle_json = kaggle_dir / "kaggle.json"
+    kaggle_json.write_text(json.dumps({"username": username, "key": key}), encoding="utf-8")
+
+    # Kaggle requires strict perms; ignore failures on Windows.
+    try:
+        os.chmod(kaggle_json, 0o600)
+    except Exception:
+        pass
+
+    print(f"kaggle.json written to: {kaggle_json}")
+    return kaggle_json
+
+
+def download_from_kaggle(dataset: str, workdir: Path, fresh: bool) -> None:
+    workdir.mkdir(parents=True, exist_ok=True)
+    if fresh and workdir.exists():
+        print(f"Cleaning workdir: {workdir}")
+        shutil.rmtree(workdir, ignore_errors=True)
+        workdir.mkdir(parents=True, exist_ok=True)
+
+    # Use the Kaggle CLI (most reliable across versions, supports --unzip easily)
+    # Equivalent to: kaggle datasets download -d <dataset> -f <file> -p <workdir> --unzip --force
+    for fn in REQUIRED_FILES:
+        run(
+            [
+                sys.executable,
+                "-m",
+                "kaggle",
+                "datasets",
+                "download",
+                "-d",
+                dataset,
+                "-f",
+                fn,
+                "-p",
+                str(workdir),
+                "--unzip",
+                "--force",
+            ]
         )
-        p = _ensure_file(Path(p), fname)
-        if not p.exists():
-            raise SystemExit(f"Download failed: expected {p} to exist for {fname}")
-        out[fname] = p
 
-    return out
+    # Sanity check
+    missing = [fn for fn in REQUIRED_FILES if not (workdir / fn).exists()]
+    if missing:
+        raise SystemExit(f"Download finished but missing files in workdir: {missing}")
+
+    for fn in REQUIRED_FILES:
+        p = workdir / fn
+        mb = p.stat().st_size / 1_048_576
+        print(f"Downloaded: {p.name:20} {mb:8.1f} MB")
 
 
-def run_build(repo_root: Path, workdir: Path, debug: bool = False) -> None:
-    """
-    Calls your repo's build.py to produce:
-      - hex_cache/
-      - player_index.parquet
-      - (optionally) nba_shot_data_final.parquet
-    Adjust CLI flags here to match your build.py.
-    """
-    build_py = repo_root / "build.py"
-    if not build_py.exists():
-        raise SystemExit(f"Missing {build_py}. Put your orchestrator at repo root or update this script.")
+def run_build(repo_root: Path, workdir: Path, force_cache: bool, debug: bool) -> None:
+    pbp = workdir / "PlayByPlay.parquet"
+    games = workdir / "Games.csv"
+    players = workdir / "Players.csv"
 
-    # Common outputs (what your Streamlit app expects)
-    hex_cache_dir = repo_root / "hex_cache"
-    player_index = repo_root / "player_index.parquet"
-    final_out = repo_root / "nba_shot_data_final.parquet"
     clean_out = repo_root / "nba_shot_data_clean.parquet"
-
-    # Ensure we start clean so stale bins don't linger
-    if hex_cache_dir.exists():
-        shutil.rmtree(hex_cache_dir, ignore_errors=True)
+    final_out = repo_root / "nba_shot_data_final.parquet"
+    player_index = repo_root / "player_index.parquet"
+    cache_dir = repo_root / "hex_cache"
 
     cmd = [
         sys.executable,
-        str(build_py),
-
-        # Inputs downloaded from Kaggle into workdir
-        "--pbp", str(workdir / "PlayByPlay.parquet"),
-        "--games", str(workdir / "Games.csv"),
-        "--players", str(workdir / "Players.csv"),
-
-        # Outputs committed to repo
-        "--clean_out", str(clean_out),
-        "--final_out", str(final_out),
-        "--player_index", str(player_index),
-        "--hex_cache_dir", str(hex_cache_dir),
-
-        "--force",
+        str(repo_root / "build.py"),
+        "--pbp",
+        str(pbp),
+        "--games",
+        str(games),
+        "--players",
+        str(players),
+        "--clean_out",
+        str(clean_out),
+        "--final_out",
+        str(final_out),
+        "--player_index",
+        str(player_index),
+        "--cache_dir",
+        str(cache_dir),
     ]
+    if force_cache:
+        cmd.append("--force_cache")
     if debug:
         cmd.append("--debug")
 
-    print("Running:", " ".join(cmd))
-    subprocess.run(cmd, check=True, cwd=str(repo_root))
+    run(cmd, cwd=repo_root)
 
-    # Sanity checks
-    if not hex_cache_dir.exists():
-        raise SystemExit("Build failed: hex_cache/ not created.")
+    if not cache_dir.exists():
+        raise SystemExit("build.py finished, but hex_cache/ is missing.")
     if not player_index.exists():
-        raise SystemExit("Build failed: player_index.parquet not created.")
+        raise SystemExit("build.py finished, but player_index.parquet is missing.")
+
+    # DO NOT keep huge intermediates in git
+    for p in [clean_out, final_out]:
+        if p.exists():
+            print(f"Removing intermediate: {p}")
+            p.unlink()
+
+    print("Build complete: hex_cache/ and player_index.parquet ready.")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", default=DATASET_DEFAULT)
-    ap.add_argument("--workdir", default="work")
-    ap.add_argument("--force-download", action="store_true", help="Force re-download from Kaggle")
+    ap.add_argument(
+        "--dataset",
+        required=True,
+        help="Kaggle dataset slug, e.g. eoinamoore/historical-nba-data-and-player-box-scores",
+    )
+    ap.add_argument("--workdir", default="work", help="Scratch folder for Kaggle downloads")
+    ap.add_argument("--fresh", action="store_true", help="Delete workdir before download")
+    ap.add_argument("--force_cache", action="store_true", help="Force rebuild hex_cache/")
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()
 
-    repo_root = Path.cwd().resolve()
+    repo_root = Path(__file__).resolve().parents[1]
     workdir = (repo_root / args.workdir).resolve()
 
-    print("Repo:", repo_root)
-    print("Work:", workdir)
-    print("Dataset:", args.dataset)
+    print("=== nightly_pipeline.py ===")
+    print("repo_root:", repo_root)
+    print("workdir  :", workdir)
+    print("dataset  :", args.dataset)
 
-    # Download required raw files (do NOT commit these)
-    download_kaggle_files(args.dataset, workdir, force=args.force_download)
+    ensure_kaggle_json()
+    download_from_kaggle(args.dataset, workdir, fresh=args.fresh)
+    run_build(repo_root, workdir, force_cache=args.force_cache, debug=args.debug)
 
-    # Build derived artifacts (DO commit these)
-    run_build(repo_root, workdir, debug=args.debug)
-
-    print("Nightly pipeline complete.")
+    print("Done.")
 
 
 if __name__ == "__main__":
