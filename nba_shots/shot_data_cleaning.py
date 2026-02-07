@@ -2,7 +2,7 @@
 import argparse
 import polars as pl
 import numpy as np
-from .shot_type_bucketing import shot_type_simple_from_subtype
+from .shot_type_bucketing import shot_type_simple_from_subtype_expr  # <--- FIXED IMPORT
 
 # ---- Court constants (feet) ----
 COURT_LENGTH_FT = 94.0
@@ -15,7 +15,7 @@ RIM_Y_FT = COURT_WIDTH_FT / 2.0                   # 25.0
 XMIN_VIZ, XMAX_VIZ = 0.0, 940.0
 YMIN_VIZ, YMAX_VIZ = 0.0, 500.0
 
-# Columns to select (Polars optimizes this automatically, but good to be explicit)
+# Columns to select
 PBP_COLS_NEEDED = [
     "GameID", "gameId", "personId", "teamId", "teamTricode",
     "Season", "period", "periodType", "clock", "timeActual",
@@ -39,8 +39,7 @@ def clean_shot_data(
     log = print if debug else (lambda *a, **k: None)
     log(f"Scanning {input_path} via Polars...")
 
-    # 1. Scan Parquet (Lazy Frame) - Instantaneous, no data loaded yet
-    # infer_schema_length=0 forces it to read the file schema directly
+    # 1. Scan Parquet (Lazy Frame)
     lf = pl.scan_parquet(input_path)
     
     # 2. Filter Columns (Handle GameID/gameId mismatch lazily)
@@ -54,14 +53,13 @@ def clean_shot_data(
         lf = lf.rename({"gameId": "GameID"})
     
     # 3. Create Basic Filters (Shot Detection)
-    # logic: isFieldGoal == 1 OR shotResult in [made, missed] OR ...
     
-    # Pre-calculate boolean expressions
-    # Note: Polars handles nulls in boolean logic differently (null != False), so we use fill_null
-    
-    # isFieldGoal check
+    # isFieldGoal check (Fill nulls with False, not 0)
     has_ifg = "isFieldGoal" in lf.columns
-    expr_ifg = pl.col("isFieldGoal").fill_null(0).cast(pl.Int8).eq(1) if has_ifg else pl.lit(False)
+    if has_ifg:
+        expr_ifg = pl.col("isFieldGoal").fill_null(False).eq(True)
+    else:
+        expr_ifg = pl.lit(False)
     
     # shotResult check
     has_sr = "shotResult" in lf.columns
@@ -85,10 +83,16 @@ def clean_shot_data(
     # Apply Shot Filter
     lf = lf.filter(expr_ifg | expr_sr | expr_sd | expr_at)
 
-    # 4. Transformations (Season, Coords, Outcomes)
+    # 4. Transformations (Season, Coords, Outcomes, ShotTypes)
+    
+    # --- Shot Type Classification (Native Polars) ---
+    if "subType" in lf.columns:
+        shot_type_expr = shot_type_simple_from_subtype_expr("subType")
+    else:
+        shot_type_expr = pl.lit("Other").alias("ShotType_Simple")
+
     lf = lf.with_columns([
-        # --- Season Derivation ---
-        # "00223..." -> slice(3,2) -> "23" -> cast int -> logic
+        # Season Derivation
         pl.when(pl.col("Season").is_null())
           .then(
               pl.when(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) >= 50)
@@ -99,18 +103,19 @@ def clean_shot_data(
           .cast(pl.Int64)
           .alias("Season"),
           
-        # --- Numeric Casting ---
+        # Numeric Casting
         pl.col("personId").cast(pl.Float64, strict=False),
         pl.col("teamId").cast(pl.Float64, strict=False),
         
-        # --- Normalize Legacy Coords ---
+        # Normalize Legacy Coords
         (pl.col("xLegacy").cast(pl.Float64, strict=False) / 10.0).alias("_w_ft"),
         (pl.col("yLegacy").cast(pl.Float64, strict=False) / 10.0).alias("_d_ft"),
+        
+        # Shot Type (calculated lazily now)
+        shot_type_expr
     ])
 
-    # Calculate Visual Coords based on previous step
-    # Polars runs expressions in parallel, but dependent columns need a second context 
-    # or just chained expressions. Chaining is cleaner here.
+    # Calculate Visual Coords
     lf = lf.with_columns([
         ((pl.lit(RIGHT_RIM_X_FT) - pl.col("_d_ft")) * 10.0).cast(pl.Float32).alias("x_viz"),
         ((pl.lit(RIM_Y_FT) + pl.col("_w_ft")) * 10.0).cast(pl.Float32).alias("y_viz"),
@@ -121,9 +126,6 @@ def clean_shot_data(
     ])
 
     # --- Shot Outcome Logic ---
-    # Made if: shotResult='made' OR actionType has 'made'
-    # Miss if: actionType has 'miss' OR description has 'MISS'
-    
     is_made = pl.lit(False)
     is_miss = pl.lit(False)
     
@@ -136,7 +138,7 @@ def clean_shot_data(
         is_miss = is_miss | at_lower.str.contains("miss")
         
     if "description" in lf.columns:
-        is_miss = is_miss | pl.col("description").str.contains("(?i)MISS") # case insensitive regex
+        is_miss = is_miss | pl.col("description").str.contains("(?i)MISS")
         
     lf = lf.with_columns(
         pl.when(is_made).then(1)
@@ -153,36 +155,15 @@ def clean_shot_data(
             pl.col("y_viz").is_between(YMIN_VIZ, YMAX_VIZ)
         )
 
-    # 6. ShotType_Simple (User-Defined Function)
-    # Since `shot_type_simple_from_subtype` is Python code, we must execute it.
-    # We collect strictly necessary columns, map, and join back OR just map if dataset is small enough now.
-    # Note: Because this uses an external Python function, we can't stream this specific step easily 
-    # without map_elements (which is slow) or rewriting that function in Polars expressions.
-    # STRATEGY: We will collect the dataset now (it's filtered and safe), convert to pandas for 
-    # just this one column if needed, or stick to Polars map_elements.
-    
+    # 6. Collection
     log("Executing plan (Streaming)...")
     
-    # STREAMING: This is the magic that prevents OOM
+    # Streaming prevents OOM on GitHub Actions
     df = lf.collect(streaming=True)
     
     log(f"Filtered to {len(df):,} rows.")
 
-    # 7. Apply the Python UDF for ShotType
-    # We do this post-collection on the smaller dataset
-    if "subType" in df.columns:
-        # Convert to pandas for the UDF to ensure 100% compatibility with your existing helper
-        # or use map_elements if you prefer to stay in Polars.
-        # Given the existing helper likely expects a Series, we'll leverage the helper.
-        
-        # Fast way: Extract column, to pandas, map, back to polars
-        subtypes_pd = df["subType"].to_pandas()
-        simple_types = shot_type_simple_from_subtype(subtypes_pd).astype(str)
-        df = df.with_columns(pl.Series("ShotType_Simple", simple_types))
-    else:
-        df = df.with_columns(pl.lit("Other").alias("ShotType_Simple"))
-
-    # 8. Save
+    # 7. Save
     log(f"Saving to {output_path}...")
     df.write_parquet(output_path)
     log("Done.")
