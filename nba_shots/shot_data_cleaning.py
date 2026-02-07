@@ -18,6 +18,70 @@ import pandas as pd
 
 from .shot_type_bucketing import shot_type_simple_from_subtype
 
+import pyarrow.parquet as pq
+
+# Only read columns we actually use downstream.
+# CRITICAL: exclude list-typed columns like `qualifiers`, `personIdsFilter`, etc.
+PBP_COLS_NEEDED = [
+    # ids / keys
+    "GameID", "gameId",
+    "personId",
+    "teamId", "teamTricode",
+
+    # season / time context
+    "Season",
+    "period", "periodType",
+    "clock", "timeActual",
+
+    # shot classification
+    "actionType",
+    "subType",
+    "descriptor",
+    "description",
+
+    # shot result / points
+    "shotResult",
+    "ShotOutcome",
+    "shotValue",
+    "pointsTotal",
+    "isFieldGoal",
+
+    # geometry
+    "xLegacy",
+    "yLegacy",
+    "shotDistance",
+
+    # misc that some older data has
+    "actionNumber",
+    "actionId",
+    "side",
+    "location",
+]
+
+def read_pbp_parquet_safe(path: str) -> pd.DataFrame:
+    """
+    Read PlayByPlay.parquet without triggering pyarrow->pandas conversion failures
+    from list<string_view> columns. We do that by ONLY loading scalar columns we need.
+    Also normalizes GameID/gameId into GameID.
+    """
+    pf = pq.ParquetFile(path)
+    available = set(pf.schema.names)
+
+    # pick columns that exist (and are safe)
+    cols = [c for c in PBP_COLS_NEEDED if c in available]
+
+    # If neither GameID nor gameId exists, fail loudly
+    if "GameID" not in cols and "gameId" not in cols:
+        raise ValueError(f"Parquet is missing GameID/gameId. Available columns: {sorted(list(available))[:50]} ...")
+
+    table = pq.read_table(path, columns=cols)  # avoids reading list columns entirely
+    df = table.to_pandas()
+
+    # normalize key column name
+    if "GameID" not in df.columns and "gameId" in df.columns:
+        df = df.rename(columns={"gameId": "GameID"})
+
+    return df
 
 # ---- Court constants (feet) ----
 COURT_LENGTH_FT = 94.0
@@ -169,7 +233,7 @@ def clean_shot_data(
     log = print if debug else (lambda *a, **k: None)
 
     log(f"Loading {input_path} ...")
-    df = pd.read_parquet(input_path)
+    df = read_pbp_parquet_safe(input_path)
     log(f"Raw loaded: n={len(df):,}, cols={len(df.columns)}")
 
     # Keep only shot rows
