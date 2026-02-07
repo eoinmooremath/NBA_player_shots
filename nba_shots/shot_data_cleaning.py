@@ -25,7 +25,11 @@ import pyarrow.parquet as pq
 PBP_COLS_NEEDED = [
     # ids / keys
     "GameID", "gameId",
+    "playerName",
+    "playerFullName",
+    "playerNameI",
     "personId",
+    
     "teamId", "teamTricode",
 
     # season / time context
@@ -234,6 +238,19 @@ def clean_shot_data(
 
     log(f"Loading {input_path} ...")
     df = read_pbp_parquet_safe(input_path)
+    # --- Canonicalize player name (robust to either column) ---
+    # Prefer playerName, fall back to playerFullName, and ensure playerName exists if either exists.
+    if "playerName" in df.columns and "playerFullName" in df.columns:
+        df["playerName"] = df["playerName"].fillna(df["playerFullName"])
+    elif "playerName" not in df.columns and "playerFullName" in df.columns:
+        df["playerName"] = df["playerFullName"]
+
+    # Optional: ensure playerFullName exists too (useful for debugging / display)
+    if "playerFullName" in df.columns and "playerName" in df.columns:
+        df["playerFullName"] = df["playerFullName"].fillna(df["playerName"])
+    elif "playerFullName" not in df.columns and "playerName" in df.columns:
+        df["playerFullName"] = df["playerName"]
+
     log(f"Raw loaded: n={len(df):,}, cols={len(df.columns)}")
 
     # Keep only shot rows
@@ -284,7 +301,7 @@ def clean_shot_data(
     cols_to_keep = [
         "actionNumber", "clock", "timeActual", "period", "periodType",
         "teamTricode", "teamId", "GameID", "Season",
-        "personId", "playerName", "playerNameI",
+        "personId", "playerName", "playerFullName","playerNameI",
         "actionType", "subType", "descriptor", "shotDistance", "shotResult", "pointsTotal",
         "area", "areaDetail",
         "ShotType_Simple", "ShotOutcome",
