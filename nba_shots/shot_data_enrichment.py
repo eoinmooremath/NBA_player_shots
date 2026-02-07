@@ -1,250 +1,263 @@
 # shot_data_enrichment.py
+#
+# Enriches the cleaned shots parquet by merging:
+#   - Players.csv (names)
+#   - Games.csv (home/away teams, gameType)
+#
+# Outputs:
+#   - nba_shot_data_final.parquet (enriched shots)
+#   - player_index.parquet (small index used by the Streamlit app)
+#
+# Debug logging is optional via --debug.
+#
 import argparse
 import os
-import polars as pl
 import re
+import pandas as pd
+import numpy as np
 
-def norm_str_expr(col_name: str) -> pl.Expr:
-    """Polars expression to normalize string columns (lowercase, strip extra spaces)."""
-    return (
-        pl.col(col_name)
-        .fill_null("")
-        .str.to_lowercase()
-        .str.replace_all(r"[\s\-_]+", " ")
-        .str.replace_all(r"\s+", " ")
-        .str.strip_chars()
-    )
 
-def map_game_type_to_season_phase_expr(col_name: str) -> pl.Expr:
+def _norm_str(x) -> str:
+    if pd.isna(x):
+        return ""
+    s = str(x).strip().lower()
+    s = re.sub(r"[\s\-_]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def map_game_type_to_season_phase(game_type_raw: str) -> str:
     """
-    Polars expression to map gameType to SeasonPhase.
-    """
-    gt = norm_str_expr(col_name)
-    
-    return (
-        pl.when(gt.is_in(["regular season", "regular"])).then(pl.lit("Regular Season"))
-          .when(gt.is_in(["preseason", "pre season"])).then(pl.lit("Preseason"))
-          .when(gt.is_in(["playoffs", "playoff"])).then(pl.lit("Playoffs"))
-          .when(gt.is_in(["play in tournament", "play in"])).then(pl.lit("Play-In Tournament"))
-          # In-Season Tournament / Cup logic
-          .when(gt.str.contains("in season") | gt.str.contains("cup") | gt.str.contains("emirates"))
-          .then(pl.lit("Regular Season"))
-          # Catch-all
-          .otherwise(pl.lit("Other"))
-    )
+    Canonical SeasonPhase values written to nba_shot_data_final.parquet:
 
-def write_player_index(df: pl.DataFrame, player_index_file: str, debug: bool = False) -> None:
+      - Regular Season
+      - Preseason
+      - Playoffs
+      - Play-In Tournament
+      - Other
+      - Unknown
+
+    UI policy (app-side):
+      - In-Season Tournament / Cup games are treated as Regular Season.
+      - Postseason is Play-In + Playoffs.
+      - Unknown/Other appear only when phase filter is "All".
+    """
+    gt = _norm_str(game_type_raw)
+    if gt == "":
+        return "Unknown"
+
+    if gt in {"regular season", "regular"}:
+        return "Regular Season"
+    if gt in {"preseason", "pre season"}:
+        return "Preseason"
+    if gt in {"playoffs", "playoff"}:
+        return "Playoffs"
+    if gt in {"play in tournament", "play in"}:
+        return "Play-In Tournament"
+
+    # In-season tournament / cup variants -> Regular Season
+    if ("in season" in gt) or ("cup" in gt) or ("emirates" in gt):
+        return "Regular Season"
+
+    if "global" in gt:
+        return "Other"
+
+    return "Other"
+
+
+def write_player_index(df_merged: pd.DataFrame, player_index_file: str, debug: bool = False) -> None:
     log = print if debug else (lambda *a, **k: None)
-    
-    # Polars is strict; ensure types before aggregation
-    pi = (
-        df.lazy()
-          .select([
-              pl.col("personId").cast(pl.Int64),
-              pl.col("Season").cast(pl.Int32),
-              pl.col("firstName"),
-              pl.col("lastName"),
-              pl.col("playerName"),
-              pl.col("playerTeamName")
-          ])
-          .drop_nulls(subset=["personId", "Season"])
+
+    cols_for_index = ["personId", "Season", "firstName", "lastName", "playerName", "playerTeamName"]
+    cols_for_index = [c for c in cols_for_index if c in df_merged.columns]
+    pi = df_merged[cols_for_index].copy()
+
+    pi["personId"] = pd.to_numeric(pi["personId"], errors="coerce")
+    pi["Season"] = pd.to_numeric(pi["Season"], errors="coerce")
+    pi = pi.dropna(subset=["personId", "Season"])
+    pi["personId"] = pi["personId"].astype("int64")
+    pi["Season"] = pi["Season"].astype("int32")
+
+    bounds = (
+        pi.groupby("personId")["Season"]
+          .agg(minSeason="min", maxSeason="max")
+          .reset_index()
     )
 
-    # 1. Calculate Bounds (Min/Max Season)
-    bounds = pi.group_by("personId").agg([
-        pl.min("Season").alias("minSeason"),
-        pl.max("Season").alias("maxSeason")
-    ])
-
-    # 2. Get Latest Team
-    # Sort by Season desc, take first
     latest_team = (
-        pi.sort(["personId", "Season"], descending=[False, True])
-          .filter(pl.col("playerTeamName").is_not_null())
-          .unique(subset=["personId"], keep="first")
-          .select(["personId", pl.col("playerTeamName").alias("latestTeam")])
+        pi.sort_values(["personId", "Season"], ascending=[True, False])
+          .dropna(subset=["playerTeamName"])
+          .drop_duplicates("personId")[["personId", "playerTeamName"]]
+          .rename(columns={"playerTeamName": "latestTeam"})
     )
 
-    # 3. Get Name info (latest)
     name_df = (
-        pi.sort(["personId", "Season"], descending=[False, True])
-          .unique(subset=["personId"], keep="first")
-          .select(["personId", "firstName", "lastName", "playerName"])
-          .with_columns(
-             (pl.col("firstName").fill_null("") + " " + pl.col("lastName").fill_null(""))
-             .str.strip_chars()
-             .alias("Full_Name")
-          )
+        pi.sort_values(["personId", "Season"], ascending=[True, False])
+          .drop_duplicates("personId")[["personId", "firstName", "lastName", "playerName"]]
     )
-    # Fix empty full names
-    name_df = name_df.with_columns(
-        pl.when(pl.col("Full_Name") == "")
-          .then(pl.col("playerName").cast(pl.String))
-          .otherwise(pl.col("Full_Name"))
-          .alias("Full_Name")
+    name_df["Full_Name"] = (
+        (name_df["firstName"].fillna("").astype(str) + " " + name_df["lastName"].fillna("").astype(str)).str.strip()
+    )
+    name_df.loc[name_df["Full_Name"].eq(""), "Full_Name"] = name_df["playerName"].astype(str)
+
+    teams = pi.dropna(subset=["playerTeamName"]).copy()
+    if len(teams):
+        first_seen = (
+            teams.groupby(["personId", "playerTeamName"])["Season"]
+                 .min()
+                 .reset_index()
+                 .sort_values(["personId", "Season", "playerTeamName"])
+        )
+        teams_played = (
+            first_seen.groupby("personId")["playerTeamName"]
+                      .apply(lambda s: list(dict.fromkeys(s.tolist())))
+                      .reset_index()
+                      .rename(columns={"playerTeamName": "teamsPlayedList"})
+        )
+        teams_played["teamsPlayed"] = teams_played["teamsPlayedList"].apply(
+            lambda xs: " · ".join([str(x) for x in xs])
+        )
+        teams_played = teams_played[["personId", "teamsPlayed"]]
+    else:
+        teams_played = pd.DataFrame({"personId": bounds["personId"], "teamsPlayed": ""})
+
+    out = (
+        name_df[["personId", "Full_Name", "firstName", "lastName"]]
+        .merge(bounds, on="personId", how="left")
+        .merge(latest_team, on="personId", how="left")
+        .merge(teams_played, on="personId", how="left")
     )
 
-    # 4. Teams Played List
-    # Group by person, collect unique teams, join them
-    teams_played = (
-        pi.filter(pl.col("playerTeamName").is_not_null())
-          .sort("Season") # Ensure order
-          .group_by("personId")
-          # maintain order of appearance (unique_stable)
-          .agg(pl.col("playerTeamName").unique(maintain_order=True).alias("teams_list"))
-          .with_columns(
-              pl.col("teams_list").map_elements(lambda x: " · ".join(x), return_dtype=pl.String).alias("teamsPlayed")
-          )
-          .select(["personId", "teamsPlayed"])
-    )
+    out["teamsPlayed"] = out["teamsPlayed"].fillna("").astype(str)
+    out["personId"] = out["personId"].astype("int64")
+    out["minSeason"] = out["minSeason"].astype("int32")
+    out["maxSeason"] = out["maxSeason"].astype("int32")
 
-    # Join everything
-    final_index = (
-        name_df
-        .join(bounds, on="personId", how="left")
-        .join(latest_team, on="personId", how="left")
-        .join(teams_played, on="personId", how="left")
-        .with_columns([
-            pl.col("teamsPlayed").fill_null(""),
-            pl.col("personId").cast(pl.Int64)
-        ])
-        .collect()
-    )
-
-    final_index.write_parquet(player_index_file)
-    log(f"Wrote {player_index_file}: rows={len(final_index):,}")
+    out.to_parquet(player_index_file, index=False)
+    log(f"Wrote {player_index_file}: rows={len(out):,}")
 
 
 def normalize_with_local_data(
-    shot_data: str,
-    games_csv: str,
-    players_csv: str,
-    output_file: str,
-    player_index_file: str,
+    shot_data: str = "nba_shot_data_cleaned.parquet",
+    games_csv: str = "Games.csv",
+    players_csv: str = "Players.csv",
+    output_file: str = "nba_shot_data_final.parquet",
+    player_index_file: str = "player_index.parquet",
     debug: bool = False,
 ) -> None:
     log = print if debug else (lambda *a, **k: None)
 
     if not os.path.exists(shot_data):
-        raise FileNotFoundError(f"Missing {shot_data}")
+        raise FileNotFoundError(f"Missing {shot_data}. Run clean_data.py first.")
+    if not os.path.exists(games_csv) or not os.path.exists(players_csv):
+        raise FileNotFoundError("Missing Games.csv or Players.csv.")
 
-    log("Scanning datasets (Lazy)...")
-    
-    # LazyFrames for efficiency
-    lf_shots = pl.scan_parquet(shot_data)
-    
-    # CSVs might have type issues, so we infer or explicitly cast if needed
-    # We use infer_schema_length=10000 or 0 (read all) to be safe
-    lf_games = pl.scan_csv(games_csv, infer_schema_length=10000)
-    lf_players = pl.scan_csv(players_csv, infer_schema_length=10000)
+    log("Loading datasets...")
+    df_shots = pd.read_parquet(shot_data)
+    df_games = pd.read_csv(games_csv, low_memory=False)
+    df_players = pd.read_csv(players_csv, low_memory=False)
 
-    # ---- Clean / Type IDs ----
-    # Ensure join keys are consistent (Strings vs Ints). 
-    # Usually GameID is string "00...", personId is Int.
-    
-    lf_shots = lf_shots.with_columns([
-        pl.col("GameID").cast(pl.String).str.strip_chars().str.pad_start(10, "0"),
-        pl.col("personId").cast(pl.Int64, strict=False)
-    ])
-    
-    lf_games = lf_games.with_columns([
-        pl.col("gameId").cast(pl.String).str.strip_chars().str.pad_start(10, "0").alias("gameId_join")
-    ])
+    log(f"Shots loaded:   n={len(df_shots):,}, cols={len(df_shots.columns)}")
+    log(f"Games loaded:   n={len(df_games):,}, cols={len(df_games.columns)}")
+    log(f"Players loaded: n={len(df_players):,}, cols={len(df_players.columns)}")
 
-    lf_players = lf_players.with_columns([
-        pl.col("personId").cast(pl.Int64, strict=False)
-    ])
+    # ---- IDs / keys ----
+    for req in ["GameID", "personId"]:
+        if req not in df_shots.columns:
+            raise KeyError(f"Shots file missing '{req}'")
+    for req in ["gameId"]:
+        if req not in df_games.columns:
+            raise KeyError(f"{games_csv} missing '{req}'")
+    for req in ["personId"]:
+        if req not in df_players.columns:
+            raise KeyError(f"{players_csv} missing '{req}'")
 
-    # ---- Filter Drops ----
-    lf_shots = lf_shots.filter(
-        pl.col("personId").is_not_null() & pl.col("GameID").is_not_null()
-    )
+    df_shots["GameID"] = df_shots["GameID"].astype(str).str.strip().str.zfill(10)
+    df_games["gameId"] = df_games["gameId"].astype(str).str.strip().str.zfill(10)
+
+    df_shots["personId"] = pd.to_numeric(df_shots["personId"], errors="coerce")
+    df_players["personId"] = pd.to_numeric(df_players["personId"], errors="coerce")
+
+    if "teamId" in df_shots.columns:
+        df_shots["teamId"] = pd.to_numeric(df_shots["teamId"], errors="coerce")
+    for c in ["hometeamId", "awayteamId"]:
+        if c in df_games.columns:
+            df_games[c] = pd.to_numeric(df_games[c], errors="coerce")
+
+    subset_drop = ["personId", "GameID"]
+    if "teamId" in df_shots.columns:
+        subset_drop.append("teamId")
+    before = len(df_shots)
+    df_shots = df_shots.dropna(subset=subset_drop)
+    log(f"Dropped {before - len(df_shots):,} shots missing {subset_drop}")
 
     # ---- Merge Players ----
-    # Select only what we need from players
-    lf_players_small = lf_players.select(["personId", "firstName", "lastName"])
-    
-    # Left Join
-    lf_merged = lf_shots.join(lf_players_small, on="personId", how="left")
-    
-    # Drop rows where player mapping failed
-    lf_merged = lf_merged.filter(
-        pl.col("firstName").is_not_null() & pl.col("lastName").is_not_null()
-    )
-    
-    # Create Full Name
-    lf_merged = lf_merged.with_columns(
-        (pl.col("firstName") + " " + pl.col("lastName")).str.strip_chars().alias("Full_Name")
-    )
+    required_player_cols = ["personId", "firstName", "lastName"]
+    for c in required_player_cols:
+        if c not in df_players.columns:
+            raise KeyError(f"{players_csv} missing '{c}'")
+
+    df_players_small = df_players[required_player_cols].copy()
+    df_merged = df_shots.merge(df_players_small, on="personId", how="left")
+    before = len(df_merged)
+    df_merged = df_merged.dropna(subset=["firstName", "lastName"])
+    log(f"Dropped {before - len(df_merged):,} shots with unmapped personId in {players_csv}")
+
+    df_merged["firstName"] = df_merged["firstName"].astype(str)
+    df_merged["lastName"] = df_merged["lastName"].astype(str)
+    df_merged["Full_Name"] = (df_merged["firstName"] + " " + df_merged["lastName"]).str.strip()
 
     # ---- Merge Games ----
-    # Select needed game cols
-    game_cols = ["gameId_join", "hometeamId", "awayteamId", "hometeamCity", "hometeamName", 
-                 "awayteamCity", "awayteamName", "gameType"]
-    # Filter only if they exist in CSV
-    valid_game_cols = [c for c in game_cols if c in lf_games.columns]
-    
-    lf_merged = lf_merged.join(
-        lf_games.select(valid_game_cols), 
-        left_on="GameID", 
-        right_on="gameId_join", 
-        how="left"
-    )
+    required_game_cols = [
+        "gameId",
+        "hometeamId", "awayteamId",
+        "hometeamCity", "hometeamName",
+        "awayteamCity", "awayteamName",
+    ]
+    for c in required_game_cols:
+        if c not in df_games.columns:
+            raise KeyError(f"{games_csv} missing '{c}'")
 
-    # ---- Player Team Logic ----
-    # Vectorized logic for home/away
-    # Polars `when().then().otherwise()` is perfect here.
-    
-    lf_merged = lf_merged.with_columns([
-        pl.when(pl.col("teamId") == pl.col("hometeamId"))
-          .then(pl.col("hometeamCity"))
-          .otherwise(pl.col("awayteamCity"))
-          .alias("playerTeamCity"),
-          
-        pl.when(pl.col("teamId") == pl.col("hometeamId"))
-          .then(pl.col("hometeamName"))
-          .otherwise(pl.col("awayteamName"))
-          .alias("playerTeamName"),
-          
-        pl.when(pl.col("teamId") == pl.col("hometeamId"))
-          .then(pl.col("awayteamCity"))
-          .otherwise(pl.col("hometeamCity"))
-          .alias("opponentTeamCity"),
+    game_cols = required_game_cols.copy()
+    if "gameType" in df_games.columns:
+        game_cols.append("gameType")
+    df_merged = df_merged.merge(df_games[game_cols], left_on="GameID", right_on="gameId", how="left")
+    log(f"Games merge coverage (hometeamId present): {df_merged['hometeamId'].notna().mean():.4f}")
 
-        pl.when(pl.col("teamId") == pl.col("hometeamId"))
-          .then(pl.col("awayteamName"))
-          .otherwise(pl.col("hometeamName"))
-          .alias("opponentTeamName"),
-    ])
+    # ---- Determine player/opponent teams ----
+    df_merged["playerTeamCity"] = pd.NA
+    df_merged["playerTeamName"] = pd.NA
+    df_merged["opponentTeamCity"] = pd.NA
+    df_merged["opponentTeamName"] = pd.NA
 
-    # ---- Season Phase ----
-    if "gameType" in lf_merged.columns:
-        lf_merged = lf_merged.with_columns(
-            map_game_type_to_season_phase_expr("gameType").alias("SeasonPhase")
-        )
+    if "teamId" in df_merged.columns:
+        is_home = df_merged["teamId"] == df_merged["hometeamId"]
+        is_away = df_merged["teamId"] == df_merged["awayteamId"]
+
+        df_merged.loc[is_home, "playerTeamCity"] = df_merged.loc[is_home, "hometeamCity"]
+        df_merged.loc[is_home, "playerTeamName"] = df_merged.loc[is_home, "hometeamName"]
+        df_merged.loc[is_home, "opponentTeamCity"] = df_merged.loc[is_home, "awayteamCity"]
+        df_merged.loc[is_home, "opponentTeamName"] = df_merged.loc[is_home, "awayteamName"]
+
+        df_merged.loc[is_away, "playerTeamCity"] = df_merged.loc[is_away, "awayteamCity"]
+        df_merged.loc[is_away, "playerTeamName"] = df_merged.loc[is_away, "awayteamName"]
+        df_merged.loc[is_away, "opponentTeamCity"] = df_merged.loc[is_away, "hometeamCity"]
+        df_merged.loc[is_away, "opponentTeamName"] = df_merged.loc[is_away, "hometeamName"]
+
+    # ---- SeasonPhase ----
+    if "gameType" in df_merged.columns:
+        df_merged["SeasonPhase"] = df_merged["gameType"].apply(map_game_type_to_season_phase).astype(str)
     else:
-        lf_merged = lf_merged.with_columns(pl.lit("Unknown").alias("SeasonPhase"))
+        df_merged["SeasonPhase"] = "Unknown"
+    df_merged["IsPostseason"] = df_merged["SeasonPhase"].isin(["Playoffs", "Play-In Tournament"]).astype(np.int8)
 
-    lf_merged = lf_merged.with_columns(
-        pl.col("SeasonPhase").is_in(["Playoffs", "Play-In Tournament"]).cast(pl.Int8).alias("IsPostseason")
-    )
+    # ---- Save final ----
+    df_merged.drop(columns=["gameId"], inplace=True, errors="ignore")
+    df_merged.to_parquet(output_file, index=False)
+    log(f"Wrote {output_file}: rows={len(df_merged):,}")
 
-    # ---- Execute and Save ----
-    # We use streaming to handle memory safety
-    log("collecting and writing final parquet (streaming)...")
-    
-    # We can write directly from the LazyFrame without collecting to RAM first if supported,
-    # but `write_parquet` usually wants a DataFrame. 
-    # `sink_parquet` is the memory-safe streaming writer in Polars.
-    lf_merged.sink_parquet(output_file)
-    
-    log(f"Wrote {output_file}")
-
-    # ---- Create Index ----
-    # Re-read the file we just wrote (it's safe and optimized now) to build the index
-    # (Or branch the LazyFrame if you prefer, but re-reading is often safer for memory peak)
-    df_final = pl.read_parquet(output_file)
-    write_player_index(df_final, player_index_file, debug=debug)
+    # ---- Player index ----
+    write_player_index(df_merged, player_index_file, debug=debug)
 
 
 def main():
@@ -265,6 +278,7 @@ def main():
         player_index_file=args.player_index,
         debug=args.debug,
     )
+
 
 if __name__ == "__main__":
     main()
