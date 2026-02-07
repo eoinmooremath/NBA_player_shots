@@ -79,8 +79,8 @@ st.markdown(
     footer {{ display: none; }}
 
     .block-container {{
-        padding-top: 0.8rem !important;
-        padding-bottom: 0.10rem !important;
+        padding-top: 0rem !important;
+        padding-bottom: 0rem !important;
     }}
     [data-testid="stAppViewContainer"] {{ padding-bottom: 0 !important; }}
     [data-testid="stAppViewContainer"] > .main {{ padding-bottom: 0 !important; }}
@@ -90,7 +90,7 @@ st.markdown(
 
     [data-testid="stWidgetLabel"] p,
     [data-testid="stWidgetLabel"] label {{
-        font-size: 18px;
+        font-size: 16px;
         font-weight: 650;
         color: #e6e6e6 !important;
         margin-bottom: 0.1rem !important;
@@ -112,8 +112,8 @@ st.markdown(
 
     div[role="radiogroup"] label {{ color: #ffffff !important; }}
 
-    [data-testid="stSidebar"] h2 {{ font-size: 22px; font-weight: 800; color: #ffffff !important; }}
-    [data-testid="stSidebar"] h3 {{ font-size: 18px; font-weight: 800; color: #ffffff !important; }}
+    [data-testid="stSidebar"] h2 {{ font-size: 20px; font-weight: 800; color: #ffffff !important; }}
+    [data-testid="stSidebar"] h3 {{ font-size: 16px; font-weight: 800; color: #ffffff !important; }}
 
     div[data-testid="stHorizontalBlock"] {{ gap: 1rem; }}
 
@@ -126,10 +126,11 @@ st.markdown(
     }}
 
     .app-title {{
-        font-size: 30px;
+        font-size: 27px;
         font-weight: 900;
         letter-spacing: 0.10em;
         text-transform: uppercase;
+        color: #ffffff !important;
         color: #c9d1d9;
         margin: 0.25rem 0 0.35rem 0;
         width: 100%;
@@ -145,14 +146,14 @@ st.markdown(
         min-width: 0;
     }}
     .player-name {{
-        font-size: 42px;
+        font-size: 34px;
         font-weight: 850;
         color: #ffffff;
         line-height: 1.1;
         white-space: nowrap;
     }}
     .teams-played {{
-        font-size: 18px;
+        font-size: 16px;
         color: #c9d1d9;
         line-height: 1.15;
         white-space: nowrap;
@@ -163,19 +164,19 @@ st.markdown(
     }}
     .date-range {{
         margin-top: 4px;
-        font-size: 22px;
+        font-size: 20px;
         color: #e6e6e6;
     }}
 
     .panel-title {{
-        font-size: 22px;
+        font-size: 20px;
         font-weight: 800;
         color: #ffffff;
         margin: 0.25rem 0 0.35rem 0;
         line-height: 1.1;
     }}
     .control-label {{
-        font-size: 18px;
+        font-size: 16px;
         font-weight: 800;
         color: #ffffff;
         margin: 0.15rem 0 0.15rem 0;
@@ -195,7 +196,7 @@ st.markdown(
         margin: 0.05rem 0 0.25rem 0;
     }}
     .kpi-title {{
-        font-size: 22px;
+        font-size: 20px;
         font-weight: 900;
         color: #c9d1d9;
         letter-spacing: 0.04em;
@@ -203,7 +204,7 @@ st.markdown(
         margin: 0;
     }}
     .kpi-context {{
-        font-size: 18px;
+        font-size: 16px;
         font-weight: 650;
         color: #e6e6e6;
         margin: 0;
@@ -249,7 +250,7 @@ st.markdown(
         justify-content: center;
         z-index: 3;
         color: #c9d1d9;
-        font-size: 18px;
+        font-size: 16px;
         font-weight: 650;
         padding: 0 12px;
         text-align: center;
@@ -275,7 +276,7 @@ st.markdown(
         background: rgba(255,255,255,0.03);
     }}
     .howto-title {{
-        font-size: 22px;
+        font-size: 20px;
         font-weight: 900;
         letter-spacing: 0.06em;
         text-transform: uppercase;
@@ -283,7 +284,7 @@ st.markdown(
         margin: 0 0 6px 0;
     }}
     .howto-body {{
-        font-size: 16px;
+        font-size: 14px;
         color: #e6e6e6;
         opacity: 0.92;
         line-height: 1.35;
@@ -298,7 +299,7 @@ st.markdown(
     }}
     .howto-meta {{
         margin-top: 8px;
-        font-size: 16px;
+        font-size: 14px;
         color: #e6e6e6;
         opacity: 0.85;
         line-height: 1.35;
