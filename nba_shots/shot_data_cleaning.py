@@ -2,7 +2,7 @@
 import argparse
 import polars as pl
 import numpy as np
-from .shot_type_bucketing import shot_type_simple_from_subtype_expr  # <--- FIXED IMPORT
+from .shot_type_bucketing import shot_type_simple_from_subtype_expr
 
 # ---- Court constants (feet) ----
 COURT_LENGTH_FT = 94.0
@@ -85,24 +85,36 @@ def clean_shot_data(
 
     # 4. Transformations (Season, Coords, Outcomes, ShotTypes)
     
-    # --- Shot Type Classification (Native Polars) ---
+    # --- Shot Type Classification ---
     if "subType" in lf.columns:
         shot_type_expr = shot_type_simple_from_subtype_expr("subType")
     else:
         shot_type_expr = pl.lit("Other").alias("ShotType_Simple")
 
+    # --- Season Derivation Logic ---
+    # Define how to calculate season from GameID (used as fallback or primary)
+    # logic: GameID 3rd/4th digits are year. >=50 is 19xx, <50 is 20xx
+    season_from_id = (
+        pl.when(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) >= 50)
+        .then(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) + 1900)
+        .otherwise(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) + 2000)
+    )
+
+    # If "Season" exists, fill nulls. If not, create it.
+    if "Season" in lf.columns:
+        season_expr = (
+            pl.when(pl.col("Season").is_null())
+            .then(season_from_id)
+            .otherwise(pl.col("Season"))
+            .cast(pl.Int64)
+            .alias("Season")
+        )
+    else:
+        season_expr = season_from_id.cast(pl.Int64).alias("Season")
+
     lf = lf.with_columns([
-        # Season Derivation
-        pl.when(pl.col("Season").is_null())
-          .then(
-              pl.when(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) >= 50)
-                .then(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) + 1900)
-                .otherwise(pl.col("GameID").str.slice(3, 2).cast(pl.Int32) + 2000)
-          )
-          .otherwise(pl.col("Season"))
-          .cast(pl.Int64)
-          .alias("Season"),
-          
+        season_expr,
+        
         # Numeric Casting
         pl.col("personId").cast(pl.Float64, strict=False),
         pl.col("teamId").cast(pl.Float64, strict=False),
@@ -111,7 +123,7 @@ def clean_shot_data(
         (pl.col("xLegacy").cast(pl.Float64, strict=False) / 10.0).alias("_w_ft"),
         (pl.col("yLegacy").cast(pl.Float64, strict=False) / 10.0).alias("_d_ft"),
         
-        # Shot Type (calculated lazily now)
+        # Shot Type
         shot_type_expr
     ])
 
@@ -158,7 +170,6 @@ def clean_shot_data(
     # 6. Collection
     log("Executing plan (Streaming)...")
     
-    # Streaming prevents OOM on GitHub Actions
     df = lf.collect(streaming=True)
     
     log(f"Filtered to {len(df):,} rows.")
