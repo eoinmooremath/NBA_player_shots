@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-from matplotlib.colors import SymLogNorm
+from matplotlib.colors import LinearSegmentedColormap, SymLogNorm
 
 from nba_shots import court_drawing as cu
 
@@ -56,6 +56,23 @@ st.markdown(
     html, body {{ margin: 0; padding: 0; }}
     .stApp {{ background-color: #0e1117; color: #ffffff; }}
 
+    /* ---- STICKY SIDEBAR FOOTER FIX ---- */
+    
+    /* 1. Target the vertical stack of widgets inside the sidebar */
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{
+        min-height: 92vh;     /* Force the widget stack to be tall */
+        display: flex;        /* Turn it into a flex container */
+        flex-direction: column;
+    }}
+
+    /* 2. Push the LAST widget (your 'How to Use' div) to the bottom */
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] > div:last-child {{
+        margin-top: auto;     /* Auto margin pushes it down */
+        padding-bottom: 20px; /* Add breathing room at the bottom */
+    }}
+    
+    /* ----------------------------------- */
+
     header[data-testid="stHeader"] {{ display: none; }}
     div[data-testid="stToolbar"] {{ display: none; }}
     #MainMenu {{ display: none; }}
@@ -73,7 +90,7 @@ st.markdown(
 
     [data-testid="stWidgetLabel"] p,
     [data-testid="stWidgetLabel"] label {{
-        font-size: 14px;
+        font-size: 18px;
         font-weight: 650;
         color: #e6e6e6 !important;
         margin-bottom: 0.1rem !important;
@@ -95,23 +112,34 @@ st.markdown(
 
     div[role="radiogroup"] label {{ color: #ffffff !important; }}
 
-    [data-testid="stSidebar"] h2 {{ font-size: 20px; font-weight: 800; color: #ffffff !important; }}
-    [data-testid="stSidebar"] h3 {{ font-size: 16px; font-weight: 800; color: #ffffff !important; }}
+    [data-testid="stSidebar"] h2 {{ font-size: 22px; font-weight: 800; color: #ffffff !important; }}
+    [data-testid="stSidebar"] h3 {{ font-size: 18px; font-weight: 800; color: #ffffff !important; }}
 
     div[data-testid="stHorizontalBlock"] {{ gap: 1rem; }}
 
+    a {{
+        color: #58a6ff !important;
+        text-decoration: none;
+    }}
+    a:hover {{
+        text-decoration: underline;
+    }}
+
     .app-title {{
-        font-size: 16px;
-        font-weight: 800;
-        letter-spacing: 0.06em;
+        font-size: 30px;
+        font-weight: 900;
+        letter-spacing: 0.10em;
         text-transform: uppercase;
         color: #c9d1d9;
         margin: 0.25rem 0 0.35rem 0;
+        width: 100%;
+        text-align: center;
     }}
+
     .header-row {{
         display: flex;
         align-items: baseline;
-        gap: 14px;
+        gap: 16px;
         margin-top: 2px;
         flex-wrap: nowrap;
         min-width: 0;
@@ -135,7 +163,7 @@ st.markdown(
     }}
     .date-range {{
         margin-top: 4px;
-        font-size: 20px;
+        font-size: 22px;
         color: #e6e6e6;
     }}
 
@@ -167,7 +195,7 @@ st.markdown(
         margin: 0.05rem 0 0.25rem 0;
     }}
     .kpi-title {{
-        font-size: 16px;
+        font-size: 22px;
         font-weight: 900;
         color: #c9d1d9;
         letter-spacing: 0.04em;
@@ -175,19 +203,18 @@ st.markdown(
         margin: 0;
     }}
     .kpi-context {{
-        font-size: 14px;
+        font-size: 18px;
         font-weight: 650;
         color: #e6e6e6;
         margin: 0;
         opacity: 0.92;
     }}
 
-    /* ---- Fixed plot wrappers: NEVER change height -> KPI never moves ---- */
     .plot-wrap {{
         position: relative;
         width: 100%;
         background: #0e1117;
-        border: none !important;      /* remove faint border */
+        border: none !important;
         outline: none !important;
         box-shadow: none !important;
         border-radius: 12px;
@@ -196,7 +223,6 @@ st.markdown(
     .plot-wrap.map {{ aspect-ratio: {MAP_ASPECT:.6f}; }}
     .plot-wrap.bar {{ aspect-ratio: {BAR_ASPECT:.6f}; }}
 
-    /* Skeleton = exactly background color (black) */
     .plot-wrap .skel {{
         position: absolute;
         inset: 0;
@@ -204,7 +230,6 @@ st.markdown(
         z-index: 0;
     }}
 
-    /* Layered map images */
     .plot-wrap img {{
         position: absolute;
         inset: 0;
@@ -224,7 +249,7 @@ st.markdown(
         justify-content: center;
         z-index: 3;
         color: #c9d1d9;
-        font-size: 14px;
+        font-size: 18px;
         font-weight: 650;
         padding: 0 12px;
         text-align: center;
@@ -242,11 +267,46 @@ st.markdown(
     .no-anim {{
         animation: none !important;
     }}
+
+    .howto {{
+        margin-top: 10px;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(255,255,255,0.03);
+    }}
+    .howto-title {{
+        font-size: 22px;
+        font-weight: 900;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: #c9d1d9;
+        margin: 0 0 6px 0;
+    }}
+    .howto-body {{
+        font-size: 16px;
+        color: #e6e6e6;
+        opacity: 0.92;
+        line-height: 1.35;
+        margin: 0;
+    }}
+    .howto-body ul {{
+        margin: 6px 0 6px 1.1rem;
+        padding: 0;
+    }}
+    .howto-body li {{
+        margin: 2px 0;
+    }}
+    .howto-meta {{
+        margin-top: 8px;
+        font-size: 16px;
+        color: #e6e6e6;
+        opacity: 0.85;
+        line-height: 1.35;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
 )
-
 # -------------------------
 # Utilities
 # -------------------------
@@ -507,7 +567,6 @@ def _lock_map_axes(ax, extent: Tuple[float, float, float, float]):
     ax.set_anchor("C")
     ax.axis("off")
 
-
 def _hexbin_only(ax, merged: pd.DataFrame, view: str, extent, gridsize: int):
     merged = merged[merged["attempts"] > 0].copy()
     if merged.empty:
@@ -524,7 +583,7 @@ def _hexbin_only(ax, merged: pd.DataFrame, view: str, extent, gridsize: int):
     elif view == "Points Added":
         C = merged["points"].to_numpy(dtype=float)
         reduce_fn = np.sum
-        cmap = "spring"
+        cmap = "plasma"
         bins = None
         vmax = float(np.nanmax(C)) if np.isfinite(C).any() else 1.0
         norm = SymLogNorm(linthresh=1.0, linscale=1.0, base=10, vmin=0, vmax=vmax)
@@ -759,11 +818,28 @@ phase_choice = st.sidebar.radio(
     key="season_phase",
 )
 phases_key = tuple(season_phase_to_groups(phase_choice))
-
+st.sidebar.markdown(
+    """
+    <div class="howto">
+      <div class="howto-title">How to use</div>
+        <div class="howto-body">
+        Explore NBA shot charts for any player since 1996, when the NBA began collecting modern shot-location data.<br/>
+        Choose a view, then filter by Shot Type, Season Phase, and Season Range.
+        </div>
+      <div class="howto-meta">
+        Created <b>February 2026</b>. Updated daily with the </br>
+        <a href="https://www.kaggle.com/datasets/eoinamoore/historical-nba-data-and-player-box-scores?select=PlayByPlay.parquet" target="_blank">latest shot information</a>.
+        <br/>
+        Inquiries: <a href="mailto:eoinmooremath@gmail.com">eoinmooremath@gmail.com</a>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 # -------------------------
 # Main header
 # -------------------------
-st.markdown('<div class="app-title">NBA Player Shots</div>', unsafe_allow_html=True)
+st.markdown('<div class="app-title">NBA PLAYER SHOTS</div>', unsafe_allow_html=True)
 
 teams_played = str(pid_to_teams.get(person_id, "")).strip()
 teams_display = teams_played if teams_played and teams_played.lower() != "nan" else ""
@@ -940,3 +1016,8 @@ k1.metric("Total Shots", f"{total_shots:,}")
 k2.metric("FG%", f"{fg_pct:.1f}%")
 k3.metric("Points", f"{total_points:,.0f}")
 k4.metric("Points / Shot", f"{pps:.2f}")
+
+# -------------------------
+# Left-column footer/help text (under Shot Map)
+# -------------------------
+
