@@ -68,56 +68,90 @@ def map_game_type_to_season_phase(game_type_raw: str) -> str:
 def write_player_index(df_merged: pd.DataFrame, player_index_file: str, debug: bool = False) -> None:
     log = print if debug else (lambda *a, **k: None)
 
-    cols_for_index = ["personId", "Season", "firstName", "lastName", "playerName", "playerTeamName"]
-    cols_for_index = [c for c in cols_for_index if c in df_merged.columns]
-    pi = df_merged[cols_for_index].copy()
+    # Build a minimal working frame (create missing cols as needed)
+    pi = df_merged.copy()
 
+    for col in ["personId", "Season"]:
+        if col not in pi.columns:
+            raise KeyError(f"write_player_index: missing required column '{col}'")
+
+    for col in ["firstName", "lastName", "playerName", "playerTeamName"]:
+        if col not in pi.columns:
+            pi[col] = pd.NA
+
+    # Coalesce playerName from other sources if missing
+    # priority: playerName -> Full_Name -> first+last -> ""
+    if "playerName" in pi.columns:
+        # If playerName is missing, try Full_Name
+        if "Full_Name" in pi.columns:
+            pi["playerName"] = pi["playerName"].fillna(pi["Full_Name"])
+        # If still missing, try first+last
+        fl = (pi["firstName"].fillna("").astype(str) + " " + pi["lastName"].fillna("").astype(str)).str.strip()
+        pi["playerName"] = pi["playerName"].fillna(fl)
+        pi.loc[pi["playerName"].astype(str).str.strip().eq(""), "playerName"] = fl
+
+    # Types / cleanup
     pi["personId"] = pd.to_numeric(pi["personId"], errors="coerce")
     pi["Season"] = pd.to_numeric(pi["Season"], errors="coerce")
     pi = pi.dropna(subset=["personId", "Season"])
     pi["personId"] = pi["personId"].astype("int64")
     pi["Season"] = pi["Season"].astype("int32")
 
+    # Season bounds per player
     bounds = (
         pi.groupby("personId")["Season"]
           .agg(minSeason="min", maxSeason="max")
           .reset_index()
     )
 
-    latest_team = (
-        pi.sort_values(["personId", "Season"], ascending=[True, False])
-          .dropna(subset=["playerTeamName"])
-          .drop_duplicates("personId")[["personId", "playerTeamName"]]
-          .rename(columns={"playerTeamName": "latestTeam"})
-    )
+    # Latest team (if available)
+    if "playerTeamName" in pi.columns:
+        latest_team = (
+            pi.sort_values(["personId", "Season"], ascending=[True, False])
+              .dropna(subset=["playerTeamName"])
+              .drop_duplicates("personId")[["personId", "playerTeamName"]]
+              .rename(columns={"playerTeamName": "latestTeam"})
+        )
+    else:
+        latest_team = pd.DataFrame({"personId": bounds["personId"], "latestTeam": pd.NA})
 
+    # Pick one “best” name row per player (latest season)
     name_df = (
         pi.sort_values(["personId", "Season"], ascending=[True, False])
           .drop_duplicates("personId")[["personId", "firstName", "lastName", "playerName"]]
+          .copy()
     )
-    name_df["Full_Name"] = (
-        (name_df["firstName"].fillna("").astype(str) + " " + name_df["lastName"].fillna("").astype(str)).str.strip()
-    )
-    name_df.loc[name_df["Full_Name"].eq(""), "Full_Name"] = name_df["playerName"].astype(str)
 
-    teams = pi.dropna(subset=["playerTeamName"]).copy()
-    if len(teams):
-        first_seen = (
-            teams.groupby(["personId", "playerTeamName"])["Season"]
-                 .min()
-                 .reset_index()
-                 .sort_values(["personId", "Season", "playerTeamName"])
-        )
-        teams_played = (
-            first_seen.groupby("personId")["playerTeamName"]
-                      .apply(lambda s: list(dict.fromkeys(s.tolist())))
-                      .reset_index()
-                      .rename(columns={"playerTeamName": "teamsPlayedList"})
-        )
-        teams_played["teamsPlayed"] = teams_played["teamsPlayedList"].apply(
-            lambda xs: " · ".join([str(x) for x in xs])
-        )
-        teams_played = teams_played[["personId", "teamsPlayed"]]
+    name_df["firstName"] = name_df["firstName"].fillna("").astype(str)
+    name_df["lastName"] = name_df["lastName"].fillna("").astype(str)
+    name_df["playerName"] = name_df["playerName"].fillna("").astype(str)
+
+    full = (name_df["firstName"] + " " + name_df["lastName"]).str.strip()
+    name_df["Full_Name"] = full
+    name_df.loc[name_df["Full_Name"].eq(""), "Full_Name"] = name_df["playerName"]
+
+    # Teams played (optional)
+    if "playerTeamName" in pi.columns:
+        teams = pi.dropna(subset=["playerTeamName"]).copy()
+        if len(teams):
+            first_seen = (
+                teams.groupby(["personId", "playerTeamName"])["Season"]
+                     .min()
+                     .reset_index()
+                     .sort_values(["personId", "Season", "playerTeamName"])
+            )
+            teams_played = (
+                first_seen.groupby("personId")["playerTeamName"]
+                          .apply(lambda s: list(dict.fromkeys(s.tolist())))
+                          .reset_index()
+                          .rename(columns={"playerTeamName": "teamsPlayedList"})
+            )
+            teams_played["teamsPlayed"] = teams_played["teamsPlayedList"].apply(
+                lambda xs: " · ".join([str(x) for x in xs])
+            )
+            teams_played = teams_played[["personId", "teamsPlayed"]]
+        else:
+            teams_played = pd.DataFrame({"personId": bounds["personId"], "teamsPlayed": ""})
     else:
         teams_played = pd.DataFrame({"personId": bounds["personId"], "teamsPlayed": ""})
 
