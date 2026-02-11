@@ -8,3 +8,4 @@ kaggle>=1.8.0
 kagglehub>= 0.4.1
 pyarrow
 fastparquet
+altair<5
